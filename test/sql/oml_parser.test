@@ -1,0 +1,23 @@
+# name: test/sql/oml_parser.test
+# description: test oml_parser extension
+# group: [oml_parser]
+
+# Before we load the extension, this will fail
+statement error
+SELECT oml_parser('Sam');
+----
+Catalog Error: Scalar Function with name oml_parser does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require oml_parser
+
+# Confirm the extension works
+query I
+SELECT oml_parser('Sam');
+----
+OmlParser Sam 🐥
+
+query I
+SELECT oml_parser_openssl_version('Michael');
+----
+<REGEX>:OmlParser Michael, my linked OpenSSL version is OpenSSL.*
