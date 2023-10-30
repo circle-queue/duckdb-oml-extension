@@ -48,6 +48,9 @@
 #include "duckdb/main/appender.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
+// Misc imports
+#include "duckdb/parser/parsed_data/create_view_info.hpp"
+
 namespace duckdb
 {
 
@@ -86,63 +89,29 @@ namespace duckdb
     catalog.CreateTable(context, std::move(info));
   }
 
-  static void OmlGenFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output)
+  // static void CreatePCView(ClientContext &context, string catalog_name, string schema, string table)
+  // {
+  //   // This doesnt work
+  //   // How do we specify where to populate the data from? Is it an sql statement we have to write?
+
+  //   // CREATE SEQUENCE IF NOT EXISTS Power_Consumption_id_seq;
+  //   // CREATE VIEW PC AS (
+  //   //     SELECT nextval('power_consumption_id_seq') AS id, cast(time_sec AS real) + cast(time_usec AS real) AS ts, power, current, voltage
+  //   //     FROM power_consumption
+  //   // );
+  //   auto info = CreateViewInfo();
+  //   info.schema = schema;
+  //   info.on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;
+  //   info.temporary = false;
+  //   info.view_name = table;
+  //   info.aliases = {"PC"};
+  //   info.types = {LogicalType::BIGINT, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE};
+
+  //   Catalog::GetCatalog(context, catalog_name).CreateView(context, info);
+  // }
+
+  pair<int, child_list_t<Value>> ParseOMLHeader(string filename)
   {
-    string catalog_name("memory");
-    string schema("main");
-    string table("power_consumption");
-
-    CreatePowerConsumptionTable(context, catalog_name, schema, table);
-
-    // Use the default csv implementation with new parameters
-    ReadCSVTableFunction::GetFunction().function(context, data_p, output);
-
-    auto &catalog = Catalog::GetCatalog(context, catalog_name);
-    auto &tbl_catalog = catalog.GetEntry<TableCatalogEntry>(context, schema, table);
-    auto appender = make_uniq<InternalAppender>(context, tbl_catalog);
-
-    // Remember, CSV (DataChunk) has columns
-    //    subject:string key:string value:string timestamp_s:uint32 timestamp_us:uint32 power:double voltage:double current:double
-    // But table has schema
-    //     experiment_id:VARCHAR, node_id:VARCHAR, node_id_seq:VARCHAR, time_sec:VARCHAR NOT NULL, time_usec:VARCHAR NOT NULL, power:REAL NOT NULL, current:REAL NOT NULL, voltage:REAL NOT NULL
-    // We must map the columns to the schema using (time)
-
-    vector<string> cols = data_p.bind_data->Cast<ReadCSVData>().return_names;
-    for (auto i = 0; i < output.data.size(); i++)
-    {
-      auto AppendByName = [&](string column)
-      {
-        auto it = find(cols.begin(), cols.end(), column);
-        D_ASSERT(it != cols.end());
-        int col_idx = std::distance(cols.begin(), it);
-        appender.get()->Append(output.GetValue(col_idx, i));
-      };
-
-      appender.get()->BeginRow();
-      appender.get()->Append("experiment_id"); // What should this be?
-      appender.get()->Append("node_id");       // What should this be?
-      appender.get()->Append("node_id_seq");   // What should this be?
-      AppendByName(string("timestamp_s"));
-      AppendByName(string("timestamp_us"));
-      AppendByName(string("power"));
-      AppendByName(string("current"));
-      AppendByName(string("voltage"));
-      appender.get()->EndRow();
-    }
-    appender.get()->Flush();
-  }
-
-  static unique_ptr<FunctionData> OmlGenBindFunction(ClientContext &context, TableFunctionBindInput &input,
-                                                     vector<LogicalType> &return_types, vector<string> &names)
-  {
-    ////////////////
-    // Assign="sep"
-    ////////////////
-    std::string sep_str("sep");
-    input.named_parameters[sep_str] = Value("\t");
-
-    string filename = input.inputs[0].ToString();
-
     std::ifstream file(filename);
     std::string line;
     int tsv_start_row = 0;
@@ -159,9 +128,6 @@ namespace duckdb
     linefeed(); // sender-id: st_lrwan1_15
     linefeed(); // app-name: control_node_measures
 
-    ////////////////
-    // Assign="columns"
-    ////////////////
     // "schema: name1:type1 name2:type2" -> vector<"name:type">
     // Later we parse "name:type" to a pair<"name", Value("type")>
     vector<string> schema_vector; // we still need to turn this into pairs
@@ -187,20 +153,73 @@ namespace duckdb
 
       column_types.emplace_back(std::make_pair(name, Value(type)));
     }
-    std::string cols_str("columns");
-    input.named_parameters[cols_str] = Value::STRUCT(column_types);
 
     linefeed(); // content: text
     D_ASSERT(linefeed().empty());
+    return std::make_pair(tsv_start_row, column_types);
+  }
 
-    ////////////////
-    // Assign="skip"
-    ////////////////
-    std::string skip_str("skip");
-    input.named_parameters[skip_str] = Value::BIGINT(tsv_start_row);
+  static unique_ptr<FunctionData> OmlGenBindFunction(ClientContext &context, TableFunctionBindInput &input,
+                                                     vector<LogicalType> &return_types, vector<string> &names)
+  {
+    string filename = input.inputs[0].ToString();
+
+    input.named_parameters["sep"] = Value("\t");
+    input.named_parameters["parallel"] = false;
+
+    pair<int, child_list_t<Value>> header = ParseOMLHeader(filename);
+    input.named_parameters["skip"] = Value::BIGINT(header.first);
+    input.named_parameters["columns"] = Value::STRUCT(header.second);
 
     // Use default csv implementation with new parameters
     return ReadCSVTableFunction::GetFunction().bind(context, input, return_types, names);
+  }
+
+  static void OmlGenFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output)
+  {
+    string catalog_name("memory");
+    string schema("main");
+    string table("power_consumption");
+
+    CreatePowerConsumptionTable(context, catalog_name, schema, table);
+    // CreatePCView(context, catalog_name, schema, table);
+
+    // Use the default csv implementation with new parameters
+    ReadCSVTableFunction::GetFunction().function(context, data_p, output);
+
+    auto &catalog = Catalog::GetCatalog(context, catalog_name);
+    auto &tbl_catalog = catalog.GetEntry<TableCatalogEntry>(context, schema, table);
+    auto appender = make_uniq<InternalAppender>(context, tbl_catalog);
+
+    // Remember, CSV (DataChunk) has columns
+    //    subject:string key:string value:string timestamp_s:uint32 timestamp_us:uint32 power:double voltage:double current:double
+    // But table has schema
+    //     experiment_id:VARCHAR, node_id:VARCHAR, node_id_seq:VARCHAR, time_sec:VARCHAR NOT NULL, time_usec:VARCHAR NOT NULL, power:REAL NOT NULL, current:REAL NOT NULL, voltage:REAL NOT NULL
+    // We must map the columns to the schema using (time)
+
+    vector<string> cols = data_p.bind_data->Cast<ReadCSVData>().return_names;
+    for (auto i = 0; i < output.size(); i++)
+    {
+      auto AppendByName = [&](string column)
+      {
+        auto it = find(cols.begin(), cols.end(), column);
+        D_ASSERT(it != cols.end());
+        int col_idx = std::distance(cols.begin(), it);
+        appender->Append(output.GetValue(col_idx, i));
+      };
+
+      appender->BeginRow();
+      appender->Append("experiment_id"); // What should this be?
+      appender->Append("node_id");       // What should this be?
+      appender->Append("node_id_seq");   // What should this be?
+      AppendByName(string("timestamp_s"));
+      AppendByName(string("timestamp_us"));
+      AppendByName(string("power"));
+      AppendByName(string("current"));
+      AppendByName(string("voltage"));
+      appender->EndRow();
+    }
+    appender->Close();
   }
 
   TableFunction OmlGenTableFunction::GetFunction()
