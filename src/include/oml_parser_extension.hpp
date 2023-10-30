@@ -4,8 +4,7 @@
 
 namespace duckdb
 {
-
-	struct ReadOMLTableFunction
+	struct OmlGenTableFunction
 	{
 		static TableFunction GetFunction();
 	};

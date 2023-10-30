@@ -38,90 +38,184 @@
 #include <fstream>
 #include <string>
 
+// from dbgen.cpp
+#include "duckdb/common/exception.hpp"
+#include "duckdb/common/types/date.hpp"
+#include "duckdb/parser/column_definition.hpp"
+#include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "duckdb/parser/constraints/not_null_constraint.hpp"
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/main/appender.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+
 namespace duckdb
 {
-  TableFunction ReadOMLTableFunction::GetFunction()
+
+  static void CreatePowerConsumptionTable(ClientContext &context, string catalog_name, string schema, string table)
   {
-    TableFunction read_oml(ReadCSVTableFunction::GetFunction());
-    read_oml.name = "read_oml";
-    // Assign a lambda function which overrides the csv bind function
-    // Conceptually, it just modifies the input arguments to the default csv bind function
-    // Modified parameters: sep, columns, skip
-    read_oml.bind = [](ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types, vector<string> &names) -> unique_ptr<FunctionData>
+    // CREATE TABLE IF NOT EXISTS Power_Consumption (
+    //     experiment_id VARCHAR,
+    //     node_id VARCHAR,
+    //     node_id_seq VARCHAR,
+    //     time_sec VARCHAR NOT NULL,
+    //     time_usec VARCHAR NOT NULL,
+    //     power REAL NOT NULL,
+    //     current REAL NOT NULL,
+    //     voltage REAL NOT NULL
+    // );
+    auto info = make_uniq<CreateTableInfo>();
+    info->schema = schema;
+    info->table = table;
+    info->on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;
+    info->temporary = false;
+    info->columns.AddColumn(ColumnDefinition("experiment_id", LogicalType::VARCHAR));
+    info->columns.AddColumn(ColumnDefinition("node_id", LogicalType::VARCHAR));
+    info->columns.AddColumn(ColumnDefinition("node_id_seq", LogicalType::VARCHAR));
+    info->columns.AddColumn(ColumnDefinition("time_sec", LogicalType::VARCHAR));
+    info->columns.AddColumn(ColumnDefinition("time_usec", LogicalType::VARCHAR));
+    info->columns.AddColumn(ColumnDefinition("power", LogicalType::DOUBLE));
+    info->columns.AddColumn(ColumnDefinition("current", LogicalType::DOUBLE));
+    info->columns.AddColumn(ColumnDefinition("voltage", LogicalType::DOUBLE));
+
+    info->constraints.push_back(make_uniq<NotNullConstraint>(LogicalIndex(3)));
+    info->constraints.push_back(make_uniq<NotNullConstraint>(LogicalIndex(4)));
+    info->constraints.push_back(make_uniq<NotNullConstraint>(LogicalIndex(5)));
+    info->constraints.push_back(make_uniq<NotNullConstraint>(LogicalIndex(6)));
+    info->constraints.push_back(make_uniq<NotNullConstraint>(LogicalIndex(7)));
+    auto &catalog = Catalog::GetCatalog(context, catalog_name);
+    catalog.CreateTable(context, std::move(info));
+  }
+
+  static void OmlGenFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output)
+  {
+    string catalog_name("memory");
+    string schema("main");
+    string table("power_consumption");
+
+    CreatePowerConsumptionTable(context, catalog_name, schema, table);
+
+    // Use the default csv implementation with new parameters
+    ReadCSVTableFunction::GetFunction().function(context, data_p, output);
+
+    auto &catalog = Catalog::GetCatalog(context, catalog_name);
+    auto &tbl_catalog = catalog.GetEntry<TableCatalogEntry>(context, schema, table);
+    auto appender = make_uniq<InternalAppender>(context, tbl_catalog);
+
+    // Remember, CSV (DataChunk) has columns
+    //    subject:string key:string value:string timestamp_s:uint32 timestamp_us:uint32 power:double voltage:double current:double
+    // But table has schema
+    //     experiment_id:VARCHAR, node_id:VARCHAR, node_id_seq:VARCHAR, time_sec:VARCHAR NOT NULL, time_usec:VARCHAR NOT NULL, power:REAL NOT NULL, current:REAL NOT NULL, voltage:REAL NOT NULL
+    // We must map the columns to the schema using (time)
+
+    vector<string> cols = data_p.bind_data->Cast<ReadCSVData>().return_names;
+    for (auto i = 0; i < output.data.size(); i++)
     {
-      ////////////////
-      // Assign="sep"
-      ////////////////
-      std::string sep_str("sep");
-      input.named_parameters[sep_str] = Value("\t");
-
-      string filename = input.inputs[0].ToString();
-
-      std::ifstream file(filename);
-      std::string line;
-      int tsv_start_row = 0;
-
-      auto linefeed = [&]() -> string
+      auto AppendByName = [&](string column)
       {
-        std::getline(file, line);
-        tsv_start_row++;
-        return line;
+        auto it = find(cols.begin(), cols.end(), column);
+        D_ASSERT(it != cols.end());
+        int col_idx = std::distance(cols.begin(), it);
+        appender.get()->Append(output.GetValue(col_idx, i));
       };
-      linefeed(); // protocol: 5
-      linefeed(); // domain: 375823
-      linefeed(); // start-time: 1689001665
-      linefeed(); // sender-id: st_lrwan1_15
-      linefeed(); // app-name: control_node_measures
 
-      ////////////////
-      // Assign="columns"
-      ////////////////
-      // "schema: name1:type1 name2:type2" -> vector<"name:type">
-      // Later we parse "name:type" to a pair<"name", Value("type")>
-      vector<string> schema_vector; // we still need to turn this into pairs
+      appender.get()->BeginRow();
+      appender.get()->Append("experiment_id"); // What should this be?
+      appender.get()->Append("node_id");       // What should this be?
+      appender.get()->Append("node_id_seq");   // What should this be?
+      AppendByName(string("timestamp_s"));
+      AppendByName(string("timestamp_us"));
+      AppendByName(string("power"));
+      AppendByName(string("current"));
+      AppendByName(string("voltage"));
+      appender.get()->EndRow();
+    }
+    appender.get()->Flush();
+  }
 
-      while (linefeed().find("schema: ") == 0) // schema: 0 _experiment_metadata subject:string key:string value:string
-      {
-        vector<string> vector = StringUtil::Split(line, " ");
-        vector.erase(vector.begin(), vector.begin() + 3);                        // https://stackoverflow.com/questions/7351899/remove-first-n-elements-from-a-stdvector
-        schema_vector.insert(schema_vector.end(), vector.begin(), vector.end()); // https://stackoverflow.com/a/3177254
-      }
+  static unique_ptr<FunctionData> OmlGenBindFunction(ClientContext &context, TableFunctionBindInput &input,
+                                                     vector<LogicalType> &return_types, vector<string> &names)
+  {
+    ////////////////
+    // Assign="sep"
+    ////////////////
+    std::string sep_str("sep");
+    input.named_parameters[sep_str] = Value("\t");
 
-      // Parse "name:type" to a pair<"name", Value("type")>
-      // This is turned to a STRUCT, which the CSV reader uses to parse the column schema
-      child_list_t<Value> column_types;
-      for (string &name_type_pair : schema_vector)
-      {
-        vector<string> pair = StringUtil::Split(name_type_pair, ":");
-        string name = pair[0];
-        string type = pair[1];
+    string filename = input.inputs[0].ToString();
 
-        type = StringUtil::Replace(type, "int32", "integer");
-        // ... add more types if needed
+    std::ifstream file(filename);
+    std::string line;
+    int tsv_start_row = 0;
 
-        column_types.emplace_back(std::make_pair(name, Value(type)));
-      }
-      std::string cols_str("columns");
-      input.named_parameters[cols_str] = Value::STRUCT(column_types);
-
-      linefeed(); // content: text
-      D_ASSERT(linefeed().empty());
-
-      ////////////////
-      // Assign="skip"
-      ////////////////
-      std::string skip_str("skip");
-      input.named_parameters[skip_str] = Value::BIGINT(tsv_start_row);
-
-      // Use default csv implementation with new parameters
-      return ReadCSVTableFunction::GetFunction().bind(context, input, return_types, names);
+    auto linefeed = [&]() -> string
+    {
+      std::getline(file, line);
+      tsv_start_row++;
+      return line;
     };
-    return read_oml;
+    linefeed(); // protocol: 5
+    linefeed(); // domain: 375823
+    linefeed(); // start-time: 1689001665
+    linefeed(); // sender-id: st_lrwan1_15
+    linefeed(); // app-name: control_node_measures
+
+    ////////////////
+    // Assign="columns"
+    ////////////////
+    // "schema: name1:type1 name2:type2" -> vector<"name:type">
+    // Later we parse "name:type" to a pair<"name", Value("type")>
+    vector<string> schema_vector; // we still need to turn this into pairs
+
+    while (linefeed().find("schema: ") == 0) // schema: 0 _experiment_metadata subject:string key:string value:string
+    {
+      vector<string> vector = StringUtil::Split(line, " ");
+      vector.erase(vector.begin(), vector.begin() + 3);                        // https://stackoverflow.com/questions/7351899/remove-first-n-elements-from-a-stdvector
+      schema_vector.insert(schema_vector.end(), vector.begin(), vector.end()); // https://stackoverflow.com/a/3177254
+    }
+
+    // Parse "name:type" to a pair<"name", Value("type")>
+    // This is turned to a STRUCT, which the CSV reader uses to parse the column schema
+    child_list_t<Value> column_types;
+    for (string &name_type_pair : schema_vector)
+    {
+      vector<string> pair = StringUtil::Split(name_type_pair, ":");
+      string name = pair[0];
+      string type = pair[1];
+
+      type = StringUtil::Replace(type, "int32", "integer");
+      // ... add more types if needed
+
+      column_types.emplace_back(std::make_pair(name, Value(type)));
+    }
+    std::string cols_str("columns");
+    input.named_parameters[cols_str] = Value::STRUCT(column_types);
+
+    linefeed(); // content: text
+    D_ASSERT(linefeed().empty());
+
+    ////////////////
+    // Assign="skip"
+    ////////////////
+    std::string skip_str("skip");
+    input.named_parameters[skip_str] = Value::BIGINT(tsv_start_row);
+
+    // Use default csv implementation with new parameters
+    return ReadCSVTableFunction::GetFunction().bind(context, input, return_types, names);
+  }
+
+  TableFunction OmlGenTableFunction::GetFunction()
+  {
+    // TableFunction OmlGen("OmlGen", {LogicalType::VARCHAR}, OmlGenFunction, OmlGenBindFunction);
+    TableFunction OmlGen(ReadCSVTableFunction::GetFunction());
+    OmlGen.name = "OmlGen";
+    OmlGen.function = OmlGenFunction;
+    OmlGen.bind = OmlGenBindFunction;
+    return OmlGen;
   }
 
   static void LoadInternal(DatabaseInstance &instance)
   {
-    ExtensionUtil::RegisterFunction(instance, ReadOMLTableFunction::GetFunction());
+    ExtensionUtil::RegisterFunction(instance, OmlGenTableFunction::GetFunction());
   }
 
   void OmlParserExtension::Load(DuckDB &db)
