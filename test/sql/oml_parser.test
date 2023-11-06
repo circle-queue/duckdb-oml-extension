@@ -4,20 +4,93 @@
 
 # Before we load the extension, this will fail
 statement error
-SELECT oml_parser('Sam');
+CALL OmlGen('handin/st_lrwan1_11.oml');
 ----
-Catalog Error: Scalar Function with name oml_parser does not exist!
+Catalog Error: Table Function with name omlgen does not exist!
+Did you mean "range"?
 
 # Require statement will ensure this test is run with this extension loaded
 require oml_parser
 
-# Confirm the extension works
+#############################
+### TEST POWER_CONSUMPTION_LOAD
+#############################
 query I
-SELECT oml_parser('Sam');
+call Power_Consumption_load('handin/st_lrwan1_11.oml');
 ----
-OmlParser Sam 🐥
+541800 values hashing to a9e7bc2ca1e0f44aee290c34d5e9ea95
 
 query I
-SELECT oml_parser_openssl_version('Michael');
+SELECT * FROM POWER_CONSUMPTION;
 ----
-<REGEX>:OmlParser Michael, my linked OpenSSL version is OpenSSL.*
+541800 values hashing to a9e7bc2ca1e0f44aee290c34d5e9ea95
+
+query IIIIIIII
+SELECT MODE(subject), MODE(key), MODE(value), SUM(timestamp_s), SUM(timestamp_us), SUM(power), SUM(voltage), SUM(current) FROM POWER_CONSUMPTION;
+----
+3.542297
+1
+1
+114960335455791
+33866875636
+19233.889451005507
+329405.7249999527
+3949.299011999908
+
+query I
+DROP TABLE POWER_CONSUMPTION;
+----
+
+#############################
+### TEST OMLGEN #1
+#############################
+query I
+call OmlGen('handin/st_lrwan1_11.oml');
+----
+541800 values hashing to a9e7bc2ca1e0f44aee290c34d5e9ea95
+
+query I
+SELECT * FROM POWER_CONSUMPTION;
+----
+541800 values hashing to a9e7bc2ca1e0f44aee290c34d5e9ea95
+
+query IIIIIIII
+SELECT MODE(subject), MODE(key), MODE(value), SUM(timestamp_s), SUM(timestamp_us), SUM(power), SUM(voltage), SUM(current) FROM POWER_CONSUMPTION;
+----
+3.542297
+1
+1
+114960335455791
+33866875636
+19233.889451005507
+329405.7249999527
+3949.299011999908
+
+query I
+DROP TABLE POWER_CONSUMPTION;
+----
+
+#############################
+### TEST OMLGEN #2
+#############################
+
+query I
+call OmlGen('handin/st_lrwan1_15.oml');
+----
+8428 values hashing to ac145ad1cfba75ed40ae6609fcb6cc79
+
+query I
+SELECT * FROM POWER_CONSUMPTION;
+----
+8428 values hashing to ac145ad1cfba75ed40ae6609fcb6cc79
+
+query IIIIIII
+SELECT MODE(subject), MODE(key), MODE(value), SUM(timestamp_s), SUM(timestamp_us), SUM(channel), SUM(rssi) FROM POWER_CONSUMPTION;
+----
+6.921095
+2
+1
+2033558733682
+1136229065
+13244
+-109564

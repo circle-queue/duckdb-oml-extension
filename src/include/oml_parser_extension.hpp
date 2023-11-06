@@ -4,11 +4,6 @@
 
 namespace duckdb
 {
-	struct OmlGenTableFunction
-	{
-		static TableFunction GetFunction();
-	};
-
 	class OmlParserExtension : public Extension
 	{
 	public:

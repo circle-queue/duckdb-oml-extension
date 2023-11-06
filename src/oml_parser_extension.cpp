@@ -1,23 +1,3 @@
-// CREATE TABLE IF NOT EXISTS Power_Consumption (
-//     experiment_id VARCHAR,
-//     node_id VARCHAR,
-//     node_id_seq VARCHAR,
-//     time_sec VARCHAR NOT NULL,
-//     time_usec VARCHAR NOT NULL,
-//     power REAL NOT NULL,
-//     current REAL NOT NULL,
-//     voltage REAL NOT NULL
-// );
-
-// COPY Power_Consumption FROM '/home/chris/duckdb-oml-extension/handin/st_lrwan1_11.oml'
-// (AUTO_DETECT TRUE);
-
-// CREATE SEQUENCE IF NOT EXISTS Power_Consumption_id_seq;
-// CREATE VIEW PC AS (
-//     SELECT nextval('power_consumption_id_seq') AS id, cast(time_sec AS real) + cast(time_usec AS real) AS ts, power, current, voltage
-//     FROM power_consumption
-// );
-
 #define DUCKDB_EXTENSION_MAIN
 
 #include "oml_parser_extension.hpp"
@@ -53,8 +33,7 @@
 
 namespace duckdb
 {
-
-  static void CreatePowerConsumptionTable(ClientContext &context, string catalog_name, string schema, string table)
+  static void CreateTableFromCSVMetadata(ClientContext &context, string catalog_name, string schema, string table, std::vector<string> cols, std::vector<LogicalType> dtypes)
   {
     // CREATE TABLE IF NOT EXISTS Power_Consumption (
     //     experiment_id VARCHAR,
@@ -71,46 +50,18 @@ namespace duckdb
     info->table = table;
     info->on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;
     info->temporary = false;
-    info->columns.AddColumn(ColumnDefinition("experiment_id", LogicalType::VARCHAR));
-    info->columns.AddColumn(ColumnDefinition("node_id", LogicalType::VARCHAR));
-    info->columns.AddColumn(ColumnDefinition("node_id_seq", LogicalType::VARCHAR));
-    info->columns.AddColumn(ColumnDefinition("time_sec", LogicalType::VARCHAR));
-    info->columns.AddColumn(ColumnDefinition("time_usec", LogicalType::VARCHAR));
-    info->columns.AddColumn(ColumnDefinition("power", LogicalType::DOUBLE));
-    info->columns.AddColumn(ColumnDefinition("current", LogicalType::DOUBLE));
-    info->columns.AddColumn(ColumnDefinition("voltage", LogicalType::DOUBLE));
+    for (auto idx = 0; idx < cols.size(); idx++)
+    {
+      info->columns.AddColumn(ColumnDefinition(cols[idx], dtypes[idx]));
+      if (idx >= 3)
+        info->constraints.push_back(make_uniq<NotNullConstraint>(LogicalIndex(idx)));
+    }
 
-    info->constraints.push_back(make_uniq<NotNullConstraint>(LogicalIndex(3)));
-    info->constraints.push_back(make_uniq<NotNullConstraint>(LogicalIndex(4)));
-    info->constraints.push_back(make_uniq<NotNullConstraint>(LogicalIndex(5)));
-    info->constraints.push_back(make_uniq<NotNullConstraint>(LogicalIndex(6)));
-    info->constraints.push_back(make_uniq<NotNullConstraint>(LogicalIndex(7)));
     auto &catalog = Catalog::GetCatalog(context, catalog_name);
     catalog.CreateTable(context, std::move(info));
   }
 
-  // static void CreatePCView(ClientContext &context, string catalog_name, string schema, string table)
-  // {
-  //   // This doesnt work
-  //   // How do we specify where to populate the data from? Is it an sql statement we have to write?
-
-  //   // CREATE SEQUENCE IF NOT EXISTS Power_Consumption_id_seq;
-  //   // CREATE VIEW PC AS (
-  //   //     SELECT nextval('power_consumption_id_seq') AS id, cast(time_sec AS real) + cast(time_usec AS real) AS ts, power, current, voltage
-  //   //     FROM power_consumption
-  //   // );
-  //   auto info = CreateViewInfo();
-  //   info.schema = schema;
-  //   info.on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;
-  //   info.temporary = false;
-  //   info.view_name = table;
-  //   info.aliases = {"PC"};
-  //   info.types = {LogicalType::BIGINT, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE};
-
-  //   Catalog::GetCatalog(context, catalog_name).CreateView(context, info);
-  // }
-
-  pair<int, child_list_t<Value>> ParseOMLHeader(string filename)
+  pair<uint64_t, child_list_t<Value>> ParseOMLHeader(string filename)
   {
     std::ifstream file(filename);
     std::string line;
@@ -171,21 +122,44 @@ namespace duckdb
     input.named_parameters["skip"] = Value::BIGINT(header.first);
     input.named_parameters["columns"] = Value::STRUCT(header.second);
 
-    // Use default csv implementation with new parameters
-    return ReadCSVTableFunction::GetFunction().bind(context, input, return_types, names);
-  }
-
-  static void OmlGenFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output)
-  {
     string catalog_name("memory");
     string schema("main");
     string table("power_consumption");
 
-    CreatePowerConsumptionTable(context, catalog_name, schema, table);
-    // CreatePCView(context, catalog_name, schema, table);
+    auto return_value = ReadCSVTableFunction::GetFunction().bind(context, input, return_types, names);
+    vector<string> cols = return_value->Cast<ReadCSVData>().return_names;
+    vector<LogicalType> dtypes = return_value->Cast<ReadCSVData>().return_types;
+    CreateTableFromCSVMetadata(context, catalog_name, schema, table, cols, dtypes);
+    // Use default csv implementation with new parameters
+    return return_value;
+  }
+
+  static unique_ptr<FunctionData> PowerConsumptionBind(ClientContext &context, TableFunctionBindInput &input,
+                                                       vector<LogicalType> &return_types, vector<string> &names)
+  {
+    // Basically uses the general OmlGenBindFunction but overrides the columns with the hardcoded names
+    auto return_value = OmlGenBindFunction(context, input, return_types, names);
+    //     experiment_id:VARCHAR, node_id:VARCHAR, node_id_seq:VARCHAR, time_sec:VARCHAR NOT NULL, time_usec:VARCHAR NOT NULL, power:REAL NOT NULL, current:REAL NOT NULL, voltage:REAL NOT NULL
+    std::vector<string> cols = {"experiment_id", "node_id", "node_id_seq", "time_sec", "time_usec", "power", "current", "voltage"};
+    std::vector<string> types = {"VARCHAR", "VARCHAR", "VARCHAR", "VARCHAR", "VARCHAR", "REAL", "REAL", "REAL"};
+
+    child_list_t<Value> column_types;
+    for (auto i = 0; i < cols.size(); i++)
+      column_types.emplace_back(std::make_pair(cols[i], Value(types[i])));
+    input.named_parameters["columns"] = Value::STRUCT(column_types);
+    return return_value;
+  }
+
+  static void OmlGenFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output)
+  {
+    vector<string> cols = data_p.bind_data->Cast<ReadCSVData>().return_names;
 
     // Use the default csv implementation with new parameters
     ReadCSVTableFunction::GetFunction().function(context, data_p, output);
+
+    string catalog_name("memory");
+    string schema("main");
+    string table("power_consumption");
 
     auto &catalog = Catalog::GetCatalog(context, catalog_name);
     auto &tbl_catalog = catalog.GetEntry<TableCatalogEntry>(context, schema, table);
@@ -195,46 +169,29 @@ namespace duckdb
     //    subject:string key:string value:string timestamp_s:uint32 timestamp_us:uint32 power:double voltage:double current:double
     // But table has schema
     //     experiment_id:VARCHAR, node_id:VARCHAR, node_id_seq:VARCHAR, time_sec:VARCHAR NOT NULL, time_usec:VARCHAR NOT NULL, power:REAL NOT NULL, current:REAL NOT NULL, voltage:REAL NOT NULL
-    // We must map the columns to the schema using (time)
-
-    vector<string> cols = data_p.bind_data->Cast<ReadCSVData>().return_names;
     for (auto i = 0; i < output.size(); i++)
     {
-      auto AppendByName = [&](string column)
-      {
-        auto it = find(cols.begin(), cols.end(), column);
-        D_ASSERT(it != cols.end());
-        int col_idx = std::distance(cols.begin(), it);
-        appender->Append(output.GetValue(col_idx, i));
-      };
-
       appender->BeginRow();
-      appender->Append("experiment_id"); // What should this be?
-      appender->Append("node_id");       // What should this be?
-      appender->Append("node_id_seq");   // What should this be?
-      AppendByName(string("timestamp_s"));
-      AppendByName(string("timestamp_us"));
-      AppendByName(string("power"));
-      AppendByName(string("current"));
-      AppendByName(string("voltage"));
+      for (auto j = 0; j < cols.size(); j++)
+        appender->Append(output.GetValue(j, i));
       appender->EndRow();
     }
     appender->Close();
   }
 
-  TableFunction OmlGenTableFunction::GetFunction()
+  static void LoadInternal(DatabaseInstance &instance)
   {
-    // TableFunction OmlGen("OmlGen", {LogicalType::VARCHAR}, OmlGenFunction, OmlGenBindFunction);
+    TableFunction Power_Consumption_load(ReadCSVTableFunction::GetFunction());
+    Power_Consumption_load.name = "Power_Consumption_load";
+    Power_Consumption_load.function = OmlGenFunction;
+    Power_Consumption_load.bind = PowerConsumptionBind;
+    ExtensionUtil::RegisterFunction(instance, Power_Consumption_load);
+
     TableFunction OmlGen(ReadCSVTableFunction::GetFunction());
     OmlGen.name = "OmlGen";
     OmlGen.function = OmlGenFunction;
     OmlGen.bind = OmlGenBindFunction;
-    return OmlGen;
-  }
-
-  static void LoadInternal(DatabaseInstance &instance)
-  {
-    ExtensionUtil::RegisterFunction(instance, OmlGenTableFunction::GetFunction());
+    ExtensionUtil::RegisterFunction(instance, OmlGen);
   }
 
   void OmlParserExtension::Load(DuckDB &db)
