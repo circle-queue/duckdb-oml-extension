@@ -1,5 +1,6 @@
 # DuckDB version: v0.9.1
 #### git hash: 401c8061c6ece35949cac58c7770cc755710ca86
+#### Extension source: https://github.com/circle-queue/duckdb-oml-extension/
 
 # Disclaimer
 All writing is my own. I've collaborated & shared ideas with Johan Laursen on the written parts, and discussed high level coding ideas, but all coding is my own with the aid of Copilot & stackoverflow where cited.
