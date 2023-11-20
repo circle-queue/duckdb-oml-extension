@@ -1,35 +1,24 @@
 #define DUCKDB_EXTENSION_MAIN
 
-#include "oml_parser_extension.hpp"
 #include "duckdb.hpp"
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/function/scalar_function.hpp"
-#include "duckdb/main/extension_util.hpp"
-#include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
-
-// OpenSSL linked through vcpkg
-#include <openssl/opensslv.h>
-
-// Copied from read_csv.cpp
-#include "duckdb/function/table/read_csv.hpp"
-
-// Read file
-#include <fstream>
-#include <string>
-
-// from dbgen.cpp
-#include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/date.hpp"
-#include "duckdb/parser/column_definition.hpp"
-#include "duckdb/parser/parsed_data/create_table_info.hpp"
-#include "duckdb/parser/constraints/not_null_constraint.hpp"
-#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/function/scalar_function.hpp"
+#include "duckdb/function/table/read_csv.hpp"
 #include "duckdb/main/appender.hpp"
-#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-
-// Misc imports
+#include "duckdb/main/extension_util.hpp"
+#include "duckdb/parser/column_definition.hpp"
+#include "duckdb/parser/constraints/not_null_constraint.hpp"
+#include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
+#include "oml_parser_extension.hpp"
+#include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
+#include <fstream>
+#include <openssl/opensslv.h>
+#include <string>
 
 namespace duckdb
 {
@@ -48,7 +37,7 @@ namespace duckdb
     auto info = make_uniq<CreateTableInfo>();
     info->schema = schema;
     info->table = table;
-    info->on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;
+    info->on_conflict = OnCreateConflict::ERROR_ON_CONFLICT;
     info->temporary = false;
     for (auto idx = 0; idx < cols.size(); idx++)
     {
@@ -129,7 +118,6 @@ namespace duckdb
     auto return_value = ReadCSVTableFunction::GetFunction().bind(context, input, return_types, names);
     vector<string> cols = return_value->Cast<ReadCSVData>().return_names;
     vector<LogicalType> dtypes = return_value->Cast<ReadCSVData>().return_types;
-    CreateTableFromCSVMetadata(context, catalog_name, schema, table, cols, dtypes);
     // Use default csv implementation with new parameters
     return return_value;
   }
@@ -179,6 +167,20 @@ namespace duckdb
     appender->Close();
   }
 
+  static unique_ptr<GlobalTableFunctionState> ReadOMLInitGlobal(ClientContext &context, TableFunctionInitInput &input)
+  {
+    vector<string> cols = input.bind_data->Cast<ReadCSVData>().return_names;
+    vector<LogicalType> dtypes = input.bind_data->Cast<ReadCSVData>().return_types;
+
+    string catalog_name("memory");
+    string schema("main");
+    string table("power_consumption");
+
+    auto &catalog = Catalog::GetCatalog(context, catalog_name);
+    CreateTableFromCSVMetadata(context, catalog_name, schema, table, cols, dtypes);
+    return ReadCSVTableFunction::GetFunction().init_global(context, input);
+  }
+
   static void LoadInternal(DatabaseInstance &instance)
   {
     TableFunction Power_Consumption_load(ReadCSVTableFunction::GetFunction());
@@ -187,10 +189,11 @@ namespace duckdb
     Power_Consumption_load.bind = PowerConsumptionBind;
     ExtensionUtil::RegisterFunction(instance, Power_Consumption_load);
 
-    TableFunction OmlGen(ReadCSVTableFunction::GetFunction());
+    TableFunction OmlGen = ReadCSVTableFunction::GetFunction();
     OmlGen.name = "OmlGen";
     OmlGen.function = OmlGenFunction;
     OmlGen.bind = OmlGenBindFunction;
+    OmlGen.init_global = ReadOMLInitGlobal;
     ExtensionUtil::RegisterFunction(instance, OmlGen);
   }
 
